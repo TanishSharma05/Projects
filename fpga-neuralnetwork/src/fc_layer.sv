@@ -1,56 +1,46 @@
-module fc_layer (
+module fc_layer #(
+    parameter int N_IN  = 169,
+    parameter int N_OUT = 2
+)(
     input  logic clk,
     input  logic reset,
-    input  logic signed [15:0] input_vec [0:3],   // Flattened pooled output (4 elements)
+    input  logic signed [15:0] input_vec [0:N_IN-1],
     input  logic               valid_in,
-
-    output logic signed [15:0] output_vec [0:1],  // FC output (2 neurons)
+    output logic signed [15:0] output_vec [0:N_OUT-1],
     output logic               valid_out
 );
+    // 8-bit weights + 16-bit bias
+    logic signed [7:0]  weights [0:N_OUT-1][0:N_IN-1];
+    logic signed [15:0] biases  [0:N_OUT-1];
 
-    // FC weight and bias ROMs (pre-trained, hardcoded or loaded separately)
-    logic signed [7:0] weights [0:1][0:3];  // 2 neurons × 4 inputs each
-    logic signed [15:0] biases  [0:1];
-
-    // One-time initialization
+    // Simple deterministic init (not trained): neuron0 all +1, neuron1 alternating +1/-1
     initial begin
-        // Neuron 0 weights
-        weights[0][0] = 8'sd2; weights[0][1] = -8'sd1;
-        weights[0][2] = 8'sd3; weights[0][3] = 8'sd1;
-        biases[0]     = 16'sd0;
-
-        // Neuron 1 weights
-        weights[1][0] = -8'sd2; weights[1][1] = 8'sd2;
-        weights[1][2] = 8'sd1;  weights[1][3] = -8'sd3;
-        biases[1]     = 16'sd5;
+        for (int o=0;o<N_OUT;o++) begin
+            for (int i=0;i<N_IN;i++) begin
+                if (o==0) weights[o][i] = 8'sd1;
+                else      weights[o][i] = (i[0]==1'b0) ? 8'sd1 : -8'sd1;
+            end
+        end
+        for (int o=0;o<N_OUT;o++) biases[o] = 16'sd0;
     end
 
-    // Multiply and accumulate logic
-    logic signed [15:0] result0, result1;
+    logic signed [31:0] acc [0:N_OUT-1]; // wider to avoid overflow during MAC
 
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
             valid_out <= 0;
         end else if (valid_in) begin
-            // Neuron 0
-            result0 = (input_vec[0] * weights[0][0]) +
-                      (input_vec[1] * weights[0][1]) +
-                      (input_vec[2] * weights[0][2]) +
-                      (input_vec[3] * weights[0][3]) + biases[0];
-
-            // Neuron 1
-            result1 = (input_vec[0] * weights[1][0]) +
-                      (input_vec[1] * weights[1][1]) +
-                      (input_vec[2] * weights[1][2]) +
-                      (input_vec[3] * weights[1][3]) + biases[1];
-
-            // Output assignment
-            output_vec[0] <= result0;
-            output_vec[1] <= result1;
-            valid_out     <= 1;
+            for (int o=0;o<N_OUT;o++) begin
+                acc[o] = 32'sd0;
+                for (int i=0;i<N_IN;i++)
+                    acc[o] += input_vec[i] * weights[o][i];
+                acc[o] += biases[o];
+                // Truncate/saturate to 16-bit (simple truncate here)
+                output_vec[o] <= acc[o][15:0];
+            end
+            valid_out <= 1;
         end else begin
             valid_out <= 0;
         end
     end
-
 endmodule

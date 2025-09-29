@@ -1,81 +1,66 @@
-module pooling_window_controller (
+module pooling_window_controller #(
+    parameter int ACT_W  = 26,
+    parameter int ACT_H  = 26,
+    parameter int POOL_K = 2,
+    parameter int POOL_S = 2
+)(
     input  logic clk,
     input  logic reset,
-    input  logic signed [15:0] act_map [0:15],  // 4x4 activation map
+    input  logic signed [15:0] act_map [0:ACT_W*ACT_H-1],
     input  logic start,
 
-    output logic signed [15:0] out0, out1, out2, out3,  // 2x2 window values
-    output logic              valid_out,
-    output logic              done
+    output logic signed [15:0] out0, out1, out2, out3, // current 2x2 window
+    output logic               valid_out,
+    output logic               done
 );
+    localparam int OUT_W = (ACT_W - POOL_K)/POOL_S + 1;
+    localparam int OUT_H = (ACT_H - POOL_K)/POOL_S + 1;
 
-    // FSM states
-    typedef enum logic [1:0] {
-        IDLE,
-        LOAD,
-        WAIT,
-        NEXT
-    } state_t;
+    typedef enum logic [1:0] {IDLE, LOAD, WAIT, NEXT} st_t;
+    st_t st, nx;
 
-    state_t state, next_state;
+    logic [$clog2(OUT_H)-1:0] row;
+    logic [$clog2(OUT_W)-1:0] col;
 
-    // Track top-left pixel of 2x2 window
-    logic [3:0] base_index;
-    logic [1:0] row, col;
-
-    // FSM sequential
     always_ff @(posedge clk or posedge reset) begin
-        if (reset) state <= IDLE;
-        else       state <= next_state;
+        if (reset) st <= IDLE;
+        else       st <= nx;
     end
 
-    // FSM combinational
     always_comb begin
-        next_state = state;
-        valid_out = 0;
-
-        case (state)
-            IDLE: if (start) next_state = LOAD;
-            LOAD: begin
-                valid_out = 1;
-                next_state = WAIT;
-            end
-            WAIT: next_state = NEXT;
-            NEXT: if (row == 2 && col == 2) next_state = IDLE;
-                  else next_state = LOAD;
+        nx = st; valid_out = 0;
+        unique case (st)
+            IDLE: nx = start ? LOAD : IDLE;
+            LOAD: begin valid_out = 1; nx = WAIT; end
+            WAIT: nx = NEXT;
+            NEXT: nx = (row==OUT_H-1 && col==OUT_W-1) ? IDLE : LOAD;
         endcase
     end
 
-    // Index management
     always_ff @(posedge clk or posedge reset) begin
-        if (reset) begin
-            row <= 0;
-            col <= 0;
-        end else if (state == NEXT) begin
-            if (col < 2) col <= col + 1;
-            else begin
-                col <= 0;
-                row <= row + 1;
-            end
+        if (reset) begin row<='0; col<='0; end
+        else if (st==NEXT) begin
+            if (col < OUT_W-1) col <= col + 1;
+            else begin col <= 0; row <= row + 1; end
+        end else if (st==IDLE && start) begin
+            row <= '0; col <= '0;
         end
     end
 
-    // Calculate 1D base index for 2x2 window
+    // base index in act_map for top-left of 2x2 window
+    logic [$clog2(ACT_W*ACT_H)-1:0] base;
     always_comb begin
-        base_index = (row * 8) + (col * 2);  // (row * width) + col
+        base = (row*POOL_S)*ACT_W + (col*POOL_S);
     end
 
-    // Output 2x2 window
     always_ff @(posedge clk) begin
-        if (state == LOAD) begin
-            out0 <= act_map[base_index];               // top-left
-            out1 <= act_map[base_index + 1];           // top-right
-            out2 <= act_map[base_index + 4];           // bottom-left
-            out3 <= act_map[base_index + 5];           // bottom-right
+        if (st==LOAD) begin
+            out0 <= act_map[base];
+            out1 <= act_map[base + 1];
+            out2 <= act_map[base + ACT_W];
+            out3 <= act_map[base + ACT_W + 1];
         end
     end
 
-    // Done flag
-    assign done = (row == 2 && col == 2 && state == NEXT);
-
+    assign done = (st==NEXT) && (row==OUT_H-1) && (col==OUT_W-1);
 endmodule

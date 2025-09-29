@@ -1,111 +1,99 @@
-module controller_fsm (
+module controller_fsm #(
+    parameter int IMG_W = 28,
+    parameter int IMG_H = 28,
+    parameter int K     = 3
+)(
     input  logic clk,
     input  logic reset,
     input  logic start,
-    input  logic patch_valid,  // Handshake from patch_extractor
+    input  logic patch_valid,  // ReLU valid indicates patch finished
 
-    output logic [3:0] pixel_addr,
-    output logic [1:0] kernel_sel,
-    output logic       load_conv,
-    output logic       load_pool,
-    output logic       load_fc
+    output logic [$clog2(IMG_H-K+1)-1:0] conv_row,
+    output logic [$clog2(IMG_W-K+1)-1:0] conv_col,
+
+    output logic patch_start,  // 1-cycle pulse to capture a patch
+    output logic begin_pool,   // pulse to start pooling sweep
+    output logic begin_flatten,// pulse to start flatten
+    output logic begin_fc      // pulse to start FC compute
 );
+    localparam int CONV_W = IMG_W-K+1;
+    localparam int CONV_H = IMG_H-K+1;
 
-    typedef enum logic [3:0] {
-        IDLE,
-        LOAD_IMAGE_PATCH,
-        CONVOLVE,
-        ACTIVATE,
-        POOL,
-        FLATTEN,
-        FC,
-        OUTPUT,
-        NEXT_PATCH,
-        DONE
+    typedef enum logic [2:0] {
+        IDLE, CONV_SCAN, POOLING, FLATTEN, FC, DONE
     } state_t;
 
-    state_t state, next_state;
+    state_t state, next;
 
-    logic [1:0] row, col;
-
-    // Address of top-left pixel of patch
-    assign pixel_addr = (row * 4) + col;
-    assign kernel_sel = 2'd0;
-
-    // FSM transitions
-    always_ff @(posedge clk or posedge reset) begin
-        if (reset)
-            state <= IDLE;
-        else
-            state <= next_state;
-    end
-
-    // FSM control logic
-    always_comb begin
-        load_conv = 0;
-        load_pool = 0;
-        load_fc   = 0;
-        next_state = state;
-
-        case (state)
-            IDLE:
-                if (start) next_state = LOAD_IMAGE_PATCH;
-
-            LOAD_IMAGE_PATCH:
-                next_state = CONVOLVE;
-
-            CONVOLVE: begin
-                load_conv = 1;
-                if (patch_valid)
-                    next_state = ACTIVATE;
-            end
-
-            ACTIVATE:
-                next_state = POOL;
-
-            POOL: begin
-                load_pool = 1;
-                next_state = FLATTEN;
-            end
-
-            FLATTEN:
-                next_state = FC;
-
-            FC: begin
-                load_fc = 1;
-                next_state = OUTPUT;
-            end
-
-            OUTPUT:
-                next_state = NEXT_PATCH;
-
-            NEXT_PATCH:
-                next_state = (row == 1 && col == 1) ? DONE : LOAD_IMAGE_PATCH;
-
-            DONE:
-                next_state = IDLE;
-
-            default:
-                next_state = IDLE;
-        endcase
-    end
-
-    // Row/col patch sliding logic
+    // Row/col iterators
     always_ff @(posedge clk or posedge reset) begin
         if (reset) begin
-            row <= 0;
-            col <= 0;
-        end else if (state == NEXT_PATCH) begin
-            // Only increment if not at final patch
-            if (!(row == 1 && col == 1)) begin
-                if (col == 1) begin
-                    col <= 0;
-                    row <= row + 1;
-                end else begin
-                    col <= col + 1;
-                end
+            conv_row <= '0;
+            conv_col <= '0;
+        end else if (state==CONV_SCAN && patch_valid) begin
+            if (conv_col == CONV_W-1) begin
+                conv_col <= '0;
+                if (conv_row == CONV_H-1)
+                    conv_row <= conv_row; // hold; transition will happen
+                else
+                    conv_row <= conv_row + 1;
+            end else begin
+                conv_col <= conv_col + 1;
             end
         end
     end
 
+    // State reg
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) state <= IDLE;
+        else       state <= next;
+    end
+
+    // Outputs & transitions
+    always_comb begin
+        patch_start   = 1'b0;
+        begin_pool    = 1'b0;
+        begin_flatten = 1'b0;
+        begin_fc      = 1'b0;
+        next          = state;
+
+        unique case (state)
+            IDLE: begin
+                if (start) begin
+                    patch_start = 1'b1; // first patch
+                    next = CONV_SCAN;
+                end
+            end
+
+            CONV_SCAN: begin
+                // Emit a start pulse for each patch right after previous is accepted
+                if (patch_valid) begin
+                    if (conv_row == CONV_H-1 && conv_col == CONV_W-1) begin
+                        next       = POOLING;
+                    end else begin
+                        patch_start = 1'b1;
+                    end
+                end
+            end
+
+            POOLING: begin
+                begin_pool = 1'b1;
+                next = FLATTEN;
+            end
+
+            FLATTEN: begin
+                begin_flatten = 1'b1;
+                next = FC;
+            end
+
+            FC: begin
+                begin_fc = 1'b1;
+                next = DONE;
+            end
+
+            DONE: begin
+                next = IDLE;
+            end
+        endcase
+    end
 endmodule
